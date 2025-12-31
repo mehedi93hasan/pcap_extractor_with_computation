@@ -5,3 +5,4 @@ pillow
 pyinstaller
 pandas
 numpy
+psutil
