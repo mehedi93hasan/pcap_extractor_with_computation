@@ -1,0 +1,31 @@
+name: Build Professional GUI
+
+on: [push]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10' # Updated for better GUI compatibility
+
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+
+    - name: Build Professional EXE
+      run: |
+        # --noconsole: Hides the black terminal window
+        # --collect-all customtkinter: Grabs all the design files/fonts
+        pyinstaller --noconsole --onefile --collect-all customtkinter --name PacketScopePro main.py
+
+    - name: Upload EXE
+      uses: actions/upload-artifact@v4
+      with:
+        name: PacketScope-Pro-App
+        path: dist/PacketScopePro.exe
