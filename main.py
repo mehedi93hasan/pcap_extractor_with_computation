@@ -6,8 +6,15 @@ import os
 from scapy.all import PcapReader, IP, TCP, UDP
 from collections import defaultdict
 from datetime import datetime
-import psutil
 import time
+
+# Try to import psutil, but don't fail if it's not available
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    print("Warning: psutil not available. Memory monitoring disabled.")
 
 # --- Configuration ---
 ctk.set_appearance_mode("Dark")
@@ -172,7 +179,7 @@ class LightweightFlowTracker:
             'iat_min': min(iats),
             'iat_max': max(iats),
             
-            # Flow timing (3)
+            # Flow timing (4)
             'flow_duration': flow_duration,
             'active_time_mean': np.mean(flow['active_periods']) if flow['active_periods'] else 0,
             'idle_time_mean': np.mean(flow['idle_periods']) if flow['idle_periods'] else 0,
@@ -229,6 +236,14 @@ class LightweightFlowTracker:
         """Get performance statistics"""
         elapsed = time.time() - self.start_time if self.start_time else 0
         
+        # Get memory usage if psutil is available
+        memory_mb = 0
+        if PSUTIL_AVAILABLE:
+            try:
+                memory_mb = psutil.Process().memory_info().rss / 1024 / 1024
+            except:
+                memory_mb = 0
+        
         return {
             'total_packets': self.packet_count,
             'total_flows': len(self.flows),
@@ -236,7 +251,7 @@ class LightweightFlowTracker:
             'packets_per_second': self.packet_count / elapsed if elapsed > 0 else 0,
             'avg_processing_time_ms': np.mean(self.processing_times) if self.processing_times else 0,
             'max_processing_time_ms': max(self.processing_times) if self.processing_times else 0,
-            'memory_mb': psutil.Process().memory_info().rss / 1024 / 1024
+            'memory_mb': memory_mb
         }
 
 
@@ -338,6 +353,10 @@ class PacketToolApp(ctk.CTk):
         self.textbox.insert("end", "  • 4 Velocity features\n")
         self.textbox.insert("end", "  • 6 Additional analysis features\n")
         self.textbox.insert("end", "  = 36 Total Features\n\n")
+        
+        if not PSUTIL_AVAILABLE:
+            self.textbox.insert("end", "⚠ Note: Memory monitoring disabled (psutil not available)\n\n")
+        
         self.textbox.configure(state="disabled")
 
     def log(self, message):
@@ -443,7 +462,6 @@ class PacketToolApp(ctk.CTk):
             self.log(f"[3/5] Processing PCAP: {os.path.basename(pcap_file)}...")
             
             packet_count = 0
-            proto_map = {6: 'tcp', 17: 'udp'}
             
             try:
                 for pkt in PcapReader(pcap_file):
@@ -525,7 +543,10 @@ class PacketToolApp(ctk.CTk):
             self.log(f"Throughput:                  {perf_stats['packets_per_second']:.0f} packets/second")
             self.log(f"Avg processing time:         {perf_stats['avg_processing_time_ms']:.4f} ms/packet")
             self.log(f"Max processing time:         {perf_stats['max_processing_time_ms']:.4f} ms/packet")
-            self.log(f"Memory usage:                {perf_stats['memory_mb']:.2f} MB")
+            
+            if PSUTIL_AVAILABLE and perf_stats['memory_mb'] > 0:
+                self.log(f"Memory usage:                {perf_stats['memory_mb']:.2f} MB")
+            
             self.log("="*80 + "\n")
 
             # 7. Raspberry Pi Feasibility Analysis
@@ -570,59 +591,169 @@ class PacketToolApp(ctk.CTk):
             
             self.log("="*80 + "\n")
 
-            # 8. Save Output
+            # 8. Generate Feature Group Analysis & Per-Feature Analysis
+            self.update_progress(0.92, "Generating feature analysis...")
+            self.log("="*80)
+            self.log("FEATURE EXTRACTION COST BREAKDOWN")
+            self.log("="*80 + "\n")
+            
+            # Define feature groups
+            feature_groups = {
+                'Header Fields (Direct)': ['src_ip', 'dst_ip', 'sport', 'dport', 'proto'],
+                'Counters (O(1))': ['syn_count', 'urg_count', 'fin_ratio'],
+                'IAT Statistics (O(n))': ['iat_mean', 'iat_std', 'iat_min', 'iat_max', 'fwd_iat_mean'],
+                'Time Features (O(n))': ['flow_duration', 'active_time_mean', 'idle_time_mean'],
+                'TTL/Window (O(n))': ['ttl_mean', 'ttl_std', 'win_size_mean', 'win_size_std'],
+                'Packet Length (O(n))': ['pkt_len_mean', 'pkt_len_std', 'pkt_len_var_coeff'],
+                'Ratios (O(1))': ['pkt_ratio', 'byte_ratio', 'size_asymmetry', 'response_rate',
+                                  'small_pkt_ratio', 'large_pkt_ratio', 'header_payload_ratio'],
+                'Flow Rates (O(1))': ['flow_pps', 'flow_bps', 'fwd_bps', 'bwd_pps'],
+                'Header Analysis (O(n))': ['header_len_mean']
+            }
+            
+            # Generate feature group analysis
+            feature_analysis = []
+            
+            for group_name, features in feature_groups.items():
+                available_features = [f for f in features if f in df_features.columns]
+                
+                if not available_features:
+                    continue
+                
+                numeric_features = [f for f in available_features if f in df_features.select_dtypes(include=[np.number]).columns]
+                
+                if numeric_features:
+                    group_data = df_features[numeric_features]
+                    
+                    feature_count = len(available_features)
+                    non_zero_count = (group_data != 0).sum().sum()
+                    total_values = len(group_data) * len(numeric_features)
+                    sparsity = (1 - non_zero_count / total_values) * 100 if total_values > 0 else 0
+                    
+                    mean_value = group_data.mean().mean()
+                    std_value = group_data.std().mean()
+                    min_value = group_data.min().min()
+                    max_value = group_data.max().max()
+                    
+                    # Determine complexity
+                    if 'Direct' in group_name or group_name.endswith('(O(1))'):
+                        complexity = 'O(1)'
+                        cost_estimate = '< 0.001 ms'
+                    else:
+                        complexity = 'O(n)'
+                        cost_estimate = '0.001-0.01 ms'
+                    
+                    self.log(f"{group_name}:")
+                    self.log(f"  Feature count:     {feature_count}")
+                    self.log(f"  Complexity:        {complexity}")
+                    self.log(f"  Estimated cost:    {cost_estimate}")
+                    self.log(f"  Mean value:        {mean_value:.4f}")
+                    self.log(f"  Std deviation:     {std_value:.4f}")
+                    self.log(f"  Value range:       [{min_value:.4f}, {max_value:.4f}]")
+                    self.log(f"  Sparsity:          {sparsity:.2f}%")
+                    self.log(f"  Examples:          {', '.join(available_features[:3])}\n")
+                    
+                    feature_analysis.append({
+                        'Feature_Group': group_name,
+                        'Feature_Count': feature_count,
+                        'Complexity': complexity,
+                        'Estimated_Cost_ms': cost_estimate,
+                        'Mean_Value': mean_value,
+                        'Std_Deviation': std_value,
+                        'Min_Value': min_value,
+                        'Max_Value': max_value,
+                        'Sparsity_Percent': sparsity,
+                        'Example_Features': ', '.join(available_features[:3])
+                    })
+            
+            # Generate per-feature analysis
+            self.log("="*80)
+            self.log("PER-FEATURE DETAILED ANALYSIS")
+            self.log("="*80 + "\n")
+            
+            per_feature_analysis = []
+            
+            for col in df_features.columns:
+                if col in ['src_ip', 'dst_ip']:
+                    continue
+                
+                if col in df_features.select_dtypes(include=[np.number]).columns:
+                    feature_data = df_features[col]
+                    
+                    mean_val = feature_data.mean()
+                    std_val = feature_data.std()
+                    min_val = feature_data.min()
+                    max_val = feature_data.max()
+                    median_val = feature_data.median()
+                    non_zero = (feature_data != 0).sum()
+                    sparsity = (1 - non_zero / len(feature_data)) * 100
+                    
+                    # Determine group
+                    group = 'Unknown'
+                    for g_name, g_features in feature_groups.items():
+                        if col in g_features:
+                            group = g_name
+                            break
+                    
+                    per_feature_analysis.append({
+                        'Feature': col,
+                        'Group': group,
+                        'Mean': mean_val,
+                        'Std': std_val,
+                        'Min': min_val,
+                        'Max': max_val,
+                        'Median': median_val,
+                        'Non_Zero_Count': non_zero,
+                        'Sparsity_%': sparsity,
+                        'Total_Flows': len(feature_data)
+                    })
+                    
+                    self.log(f"{col:25s} | Mean: {mean_val:12.4f} | Std: {std_val:12.4f} | Range: [{min_val:10.4f}, {max_val:10.4f}] | Sparsity: {sparsity:5.2f}%")
+            
+            self.log("\n" + "="*80 + "\n")
+
+            # 9. Save All Output Files
             self.update_progress(0.95, "Saving results...")
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_file = f"UNSW_NB15_36Features_{timestamp}.csv"
             
-            # Reorder columns
+            # Save main features dataset
+            output_file = f"UNSW_NB15_36Features_{timestamp}.csv"
             cols = list(df_features.columns)
             if 'label' in cols:
                 cols.remove('label')
                 cols.append('label')
             df_features = df_features[cols]
-            
             df_features.to_csv(output_file, index=False)
             
-            self.log("="*80)
+            # Save feature group analysis
+            group_analysis_file = f"feature_group_analysis_{timestamp}.csv"
+            if feature_analysis:
+                df_group_analysis = pd.DataFrame(feature_analysis)
+                df_group_analysis.to_csv(group_analysis_file, index=False)
+                self.log(f"✓ Feature group analysis saved: {group_analysis_file}")
+            
+            # Save per-feature analysis
+            per_feature_file = f"per_feature_analysis_{timestamp}.csv"
+            if per_feature_analysis:
+                df_per_feature = pd.DataFrame(per_feature_analysis)
+                df_per_feature.to_csv(per_feature_file, index=False)
+                self.log(f"✓ Per-feature analysis saved: {per_feature_file}")
+            
+            self.log("\n" + "="*80)
             self.log("DATASET GENERATED SUCCESSFULLY")
             self.log("="*80)
-            self.log(f"Output file:                 {output_file}")
-            self.log(f"Total flows:                 {len(df_features):,}")
+            self.log(f"Main dataset:                {output_file}")
+            self.log(f"Feature group analysis:      {group_analysis_file}")
+            self.log(f"Per-feature analysis:        {per_feature_file}")
+            self.log(f"\nTotal flows:                 {len(df_features):,}")
             self.log(f"Total features:              36 (+ 5 identifiers)")
-            self.log(f"File size:                   {os.path.getsize(output_file) / 1024:.2f} KB")
+            self.log(f"Main file size:              {os.path.getsize(output_file) / 1024:.2f} KB")
             self.log(f"\nLabel Distribution:")
             
             label_counts = df_features['label'].value_counts()
             for label, count in label_counts.items():
                 percentage = (count / len(df_features)) * 100
                 self.log(f"  {label:25s}: {count:6,} ({percentage:5.2f}%)")
-            
-            self.log("="*80 + "\n")
-            
-            # 9. Feature Analysis Summary
-            self.log("="*80)
-            self.log("FEATURE EXTRACTION SUMMARY")
-            self.log("="*80)
-            
-            feature_groups = {
-                'Time Dynamics': ['iat_mean', 'iat_std', 'iat_min', 'iat_max', 
-                                 'flow_duration', 'active_time_mean', 'idle_time_mean', 'fwd_iat_mean'],
-                'Header Invariants': ['ttl_mean', 'ttl_std', 'win_size_mean', 'win_size_std',
-                                     'syn_count', 'urg_count', 'fin_ratio', 'header_len_mean'],
-                'Traffic Symmetry': ['pkt_ratio', 'byte_ratio', 'size_asymmetry', 'response_rate'],
-                'Payload Dynamics': ['pkt_len_mean', 'pkt_len_std', 'pkt_len_var_coeff',
-                                    'small_pkt_ratio', 'large_pkt_ratio', 'header_payload_ratio'],
-                'Velocity': ['flow_pps', 'flow_bps', 'fwd_bps', 'bwd_pps']
-            }
-            
-            for group_name, features in feature_groups.items():
-                available = [f for f in features if f in df_features.columns]
-                self.log(f"\n{group_name} ({len(available)} features):")
-                for feat in available:
-                    mean_val = df_features[feat].mean()
-                    std_val = df_features[feat].std()
-                    self.log(f"  {feat:25s}: mean={mean_val:12.4f}, std={std_val:12.4f}")
             
             self.log("\n" + "="*80)
             self.log("✓ ANALYSIS COMPLETE!")
